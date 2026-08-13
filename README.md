@@ -1,10 +1,5 @@
 # PM2.5_HYBRID_GWR
 
-Code and station-day panel for the manuscript:
-
-> **Moran's I--Gated GWR Residual Correction for Satellite-Based PM2.5 Mapping:
-> A Multi-Estimator Decision Framework** (Thailand, 2023--2025)
-
 A single daily GWR residual correction, applied only when a Moran's I gate
 detects spatial structure in the stage-one residuals, is held fixed while the
 stage-one estimator varies (LME, RF, GB, XGBoost), evaluated under random
