@@ -1,0 +1,22 @@
+# Core pipeline
+numpy
+pandas
+scipy
+scikit-learn
+statsmodels
+pyyaml
+joblib
+threadpoolctl
+
+# Stage-2 GWR + Moran gate
+mgwr==2.2.1
+libpysal
+esda
+
+# Tree ensembles (XGBoost optional; pipeline degrades gracefully without it)
+xgboost
+
+# Mapping / figures (only needed for map_raster stage and figure scripts)
+rasterio
+geopandas
+matplotlib

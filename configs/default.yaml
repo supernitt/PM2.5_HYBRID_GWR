@@ -1,0 +1,200 @@
+# =====================================================================
+# Default configuration for the PM2.5 hybrid pipeline
+# MAIN ANALYSIS ARM: observed AOD only (aod_policy: observed)
+# Sensitivity arm: configs/aod_imputed.yaml
+# =====================================================================
+
+paths:
+  panel_file: "./data/panel.csv" # station-day panel (this repo: data/panel.csv)
+  grid_file:  "./data/grid_panel.csv" # grid-day predictors (optional, not included)
+  output_dir: "./outputs"
+
+# ---------------------------------------------------------------------
+# Study period — everything (training, CV, rasters, exceedance stats)
+# is restricted to this window.  run0 leaked 139 days of 2026 rasters
+# into the headline exceedance numbers; this makes that impossible.
+# ---------------------------------------------------------------------
+study_period:
+  start: "2023-01-01"
+  end:   "2025-12-31"
+
+# ---------------------------------------------------------------------
+# Column names in the panel file (rename here if your CSV uses other names)
+# ---------------------------------------------------------------------
+# Predictor set (12 variables):
+#   Satellite aerosol:  aod (MAIAC MCD19A2)
+#   Meteorological:     t2m, rh, ws, blh, prec, ssr, sp (ERA5-Land / ERA5)
+#   Source proxy:       frp (VIIRS VNP14A1)
+#   Land surface:       ndvi (MOD13A2), elev (SRTM), pop (GPWv4)
+columns:
+  station_id: "station_id"
+  date:       "date"
+  lat:        "lat"
+  lon:        "lon"
+  target:     "pm25"
+  aod:        "aod"
+  meteo:      ["t2m", "rh", "ws", "blh", "prec", "ssr", "sp"]
+  ancillary:  ["frp", "ndvi", "elev", "pop"]
+
+# ---------------------------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------------------------
+preprocessing:
+  drop_missing_target: true
+  drop_missing_aod: true
+  log_transform_pm25: false
+  standardize_predictors: true       # full-data scaler for train/raster;
+                                     # CV always refits per training fold
+  vif_threshold: 10                  # warn (not drop) if VIF exceeds this
+
+  # AOD policy — "observed" (main analysis: MAIAC retrievals only) or
+  # "imputed" (sensitivity arm: per-station linear interpolation of interior
+  # gaps <= aod_impute_max_gap_days; imputed rows flagged in `aod_imputed`).
+  aod_policy: "observed"
+  aod_impute_max_gap_days: 7         # 83% of AOD gap runs are <= 7 days;
+                                     # monsoon-long gaps stay NaN and drop out
+
+  # Physical valid ranges in the panel's native units.  Values outside are
+  # masked to NaN (guards against GEE -9999 sentinels and unit errors);
+  # a column losing >10% of its values raises instead of silently masking.
+  valid_ranges:
+    pm25: [0, 600]                   # ug/m3
+    aod:  [0, 5]                     # unitless (MAIAC 550 nm)
+    t2m:  [-10, 50]                  # deg C
+    rh:   [0, 100]                   # %
+    ws:   [0, 60]                    # m/s
+    blh:  [10, 6000]                 # m
+    prec: [-0.000001, 1]             # m/day (ERA5 native; tiny negatives are float noise, not corruption)
+    ssr:  [0, 50000000]              # J/m2/day
+    sp:   [50000, 110000]            # Pa
+    frp:  [0, 1000000]               # MW (buffer sum; loose upper bound)
+    ndvi: [-1, 1]
+    elev: [-100, 9000]               # m
+    pop:  [0, 1000000]               # persons/km2
+
+  # Legacy Savitzky-Golay smoothing — OFF.  run0 interpolated + smoothed all
+  # predictors to completeness BEFORE the missing-AOD filter, which fabricated
+  # 66% of AOD values and manufactured pooled VIFs of 1e5-1e6.  Kept only for
+  # an explicit sensitivity comparison; never for headline results.
+  smooth_predictors: false
+  savgol_window: 11                  # used only if smooth_predictors: true
+  savgol_polyorder: 3
+  static_predictors: ["elev", "pop"] # skipped by SG smoother (constant per station)
+
+# ---------------------------------------------------------------------
+# LME (Stage 1)
+# ---------------------------------------------------------------------
+lme:
+  random_intercept: true
+  random_slope_on_aod: true          # b_i in Eq. (1) of the manuscript
+  reml: true
+
+# ---------------------------------------------------------------------
+# GWR (Stage 2 — applied to Stage-1 residuals)
+# ---------------------------------------------------------------------
+gwr:
+  kernel: "gaussian"                 # 'gaussian' or 'bisquare'
+  adaptive: true                     # adaptive kernel (number of neighbors)
+  bw_search: "AICc"                  # 'AICc', 'AIC', 'BIC', 'CV'
+  # Explicit adaptive-bandwidth search range.  Left null, mgwr's internal
+  # default lower bound pinned ~70% of run0 days at 45-46 neighbours — a
+  # boundary artifact reported as an "optimum".  bw_min is still clamped at
+  # the numerical stability floor (>= 3 x n_params, >= min_stations_per_day).
+  bw_min: 20
+  bw_max: null                       # null = n_stations - 1 per day
+  morans_alpha: 0.05                 # skip Stage-2 when residuals not autocorr.
+  min_stations_per_day: 20           # skip days with too few records
+  # Stage-2 GWR predictor set (subset of the full predictor list).
+  # Stage-1 already removes all predictor effects globally; Stage-2 captures
+  # the residual's spatial structure.  intercept + AOD is the numerically
+  # stable choice (see vif_pooled.csv for why the full set is singular).
+  predictors: ["aod"]
+
+# ---------------------------------------------------------------------
+# Benchmarks — grids used BOTH for full-data tuning (train stage) and,
+# via stored params, for the CV arms.  Standalones and hybrids receive
+# identical tuning treatment (run0 did not, which fabricated most of the
+# apparent GWR gain for GB/XGB).
+# ---------------------------------------------------------------------
+benchmarks:
+  pcr:
+    n_components_search: [2, 3, 4, 5, 6, 7, 8, 9, 10]
+  plsr:
+    n_components_search: [2, 3, 4, 5, 6, 7, 8, 9, 10]
+  rf:
+    n_estimators: [100, 200, 300, 400, 500]
+    max_depth: [null, 5, 10, 20]
+    min_samples_leaf: [1, 2, 3, 4, 5]
+  gb:
+    n_estimators: [100, 200, 300, 400, 500]
+    max_depth: [3, 5, 10]
+    learning_rate: [0.05, 0.1]
+  xgboost:
+    n_estimators: [100, 200, 300, 400, 500]
+    max_depth: [5, 10, 20]
+    learning_rate: [0.05, 0.1]
+    subsample: [0.8, 1.0]
+    colsample_bytree: [0.8, 1.0]
+
+# ---------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------
+validation:
+  random_kfold: 10
+  site_kfold: 10
+  random_seed: 42
+  stratify_by:
+    season: true                     # also report seasonal metrics
+    region: true                     # also report regional metrics
+
+# ---------------------------------------------------------------------
+# Spatial mapping (CSV-based — kept for moderate-size grids)
+# ---------------------------------------------------------------------
+mapping:
+  enable: true
+  min_valid_days_per_month: 7
+  save_daily_grids: false            # set true only if disk space permits
+  save_monthly_grids: true
+  save_seasonal_grids: true
+
+# ---------------------------------------------------------------------
+# Raster-based mapping (recommended for country-scale 3-year predictions)
+# Prediction dates are restricted to study_period automatically.
+# ---------------------------------------------------------------------
+raster_mapping:
+  enable: false                      # turn on with --stages map_raster
+  grid_dir: "./data/grids"           # root with one subfolder per daily predictor
+  output_dir: "./outputs/pm25_predictions"
+  daily_predictors:                  # vary per day (one GeoTIFF per date)
+    - "aod"
+    - "t2m"
+    - "rh"
+    - "ws"
+    - "blh"
+    - "prec"
+    - "ssr"
+    - "sp"
+    - "frp"
+    - "ndvi"                         # MOD13A2 16-day, linearly interpolated to daily
+  static_predictors:                 # single GeoTIFF (no date in filename)
+    - "elev"                         # SRTM
+    - "pop"                          # GPWv4 (held constant within each 3-year period)
+  model_kind: "hybrid_gb"            # deployment model is chosen by SITE-BASED CV
+                                     # (off-network transferability), not random CV.
+                                     # options: hybrid_rf / hybrid_gb / hybrid_xgb,
+                                     # 'hybrid' (LME+GWR), 'lme',
+                                     # 'rf', 'gb', 'xgboost' (standalone benchmarks)
+  k_neighbors_idw: 8                 # for hybrid GWR coefficient interpolation
+  skip_existing: true                # don't overwrite already-written prediction rasters
+  aggregate:
+    enable: true
+    min_valid_days_per_month: 7
+    min_valid_days_per_year: 180
+    save_monthly: true
+    save_seasonal: true
+
+# ---------------------------------------------------------------------
+# Compute
+# ---------------------------------------------------------------------
+compute:
+  n_jobs: 24

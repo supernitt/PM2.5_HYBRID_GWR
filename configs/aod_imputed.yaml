@@ -1,0 +1,111 @@
+# =====================================================================
+# SENSITIVITY ARM: disclosed AOD imputation
+# Identical to configs/default.yaml except:
+#   - aod_policy: imputed  (per-station linear interpolation of interior
+#     gaps <= 7 days; imputed rows flagged in the `aod_imputed` column)
+#   - separate output_dir so the two arms never overwrite each other
+#
+# Run AFTER the observed-AOD main arm.  Results feed the manuscript's
+# sensitivity analysis and the AOD-availability disclosure statement.
+# This file intentionally repeats the full config (the pipeline has no
+# include/override mechanism) — keep it in sync with default.yaml except
+# for the three fields marked  ## SENSITIVITY .
+# =====================================================================
+
+paths:
+  panel_file: "./data/panel.csv"
+  grid_file:  "./data/grid_panel.csv"
+  output_dir: "./outputs_aod_imputed"      ## SENSITIVITY
+
+study_period:
+  start: "2023-01-01"
+  end:   "2025-12-31"
+
+columns:
+  station_id: "station_id"
+  date:       "date"
+  lat:        "lat"
+  lon:        "lon"
+  target:     "pm25"
+  aod:        "aod"
+  meteo:      ["t2m", "rh", "ws", "blh", "prec", "ssr", "sp"]
+  ancillary:  ["frp", "ndvi", "elev", "pop"]
+
+preprocessing:
+  drop_missing_target: true
+  drop_missing_aod: true
+  log_transform_pm25: false
+  standardize_predictors: true
+  vif_threshold: 10
+  aod_policy: "imputed"                    ## SENSITIVITY
+  aod_impute_max_gap_days: 7               ## SENSITIVITY
+  valid_ranges:
+    pm25: [0, 600]
+    aod:  [0, 5]
+    t2m:  [-10, 50]
+    rh:   [0, 100]
+    ws:   [0, 60]
+    blh:  [10, 6000]
+    prec: [-0.000001, 1]
+    ssr:  [0, 50000000]
+    sp:   [50000, 110000]
+    frp:  [0, 1000000]
+    ndvi: [-1, 1]
+    elev: [-100, 9000]
+    pop:  [0, 1000000]
+  smooth_predictors: false
+  savgol_window: 11
+  savgol_polyorder: 3
+  static_predictors: ["elev", "pop"]
+
+lme:
+  random_intercept: true
+  random_slope_on_aod: true
+  reml: true
+
+gwr:
+  kernel: "gaussian"
+  adaptive: true
+  bw_search: "AICc"
+  bw_min: 20
+  bw_max: null
+  morans_alpha: 0.05
+  min_stations_per_day: 20
+  predictors: ["aod"]
+
+benchmarks:
+  pcr:
+    n_components_search: [2, 3, 4, 5, 6, 7, 8, 9, 10]
+  plsr:
+    n_components_search: [2, 3, 4, 5, 6, 7, 8, 9, 10]
+  rf:
+    n_estimators: [100, 200, 300, 400, 500]
+    max_depth: [null, 5, 10, 20]
+    min_samples_leaf: [1, 2, 3, 4, 5]
+  gb:
+    n_estimators: [100, 200, 300, 400, 500]
+    max_depth: [3, 5, 10]
+    learning_rate: [0.05, 0.1]
+  xgboost:
+    n_estimators: [100, 200, 300, 400, 500]
+    max_depth: [5, 10, 20]
+    learning_rate: [0.05, 0.1]
+    subsample: [0.8, 1.0]
+    colsample_bytree: [0.8, 1.0]
+
+validation:
+  random_kfold: 10
+  site_kfold: 10
+  random_seed: 42
+  stratify_by:
+    season: true
+    region: true
+
+mapping:
+  enable: false                            ## rasters come from the main arm only
+
+raster_mapping:
+  enable: false
+
+compute:
+  n_jobs: 24                          ## Please specify according to computational resource
